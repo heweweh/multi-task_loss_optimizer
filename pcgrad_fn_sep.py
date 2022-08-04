@@ -22,40 +22,46 @@ def set_gradient(grads, model, shapes):
 
 def pcgrad_fn(model, losses, optimizer, mode='mean'):
     grad_list = []
-    shapes = []
     shares = []
+    shapes = []
     for i, loss in enumerate(losses):
         get_gradient(model, loss)
         grads = []
+        share_iter = iter(shares)
         for p in model.parameters():
+            grad = None
+            if p.grad is not None:
+                grad = p.grad.view(-1)
+            else:
+                grad = torch.zeros_like(p).view(-1)            
+            grads.append(grad)
             if i == 0:
                 shapes.append(p.shape)
-            if p.grad is not None:
-                grads.append(p.grad.view(-1))
+                shares.append(grad != 0)
             else:
-                grads.append(torch.zeros_like(p).view(-1))
-        new_grad = torch.cat(grads, dim=0)
-        grad_list.append(new_grad)
+                share = next(share_iter)
+                share &= (grad != 0)
 
-        if shares == []:
-            shares = (new_grad != 0)
-        else:
-            shares &= (new_grad != 0)
+        grad_list.append(grads)
+
     #clear memory
     loss_all = 0
     for los in losses:
         loss_all += los
     loss_all.backward()
     grad_list2 = copy.deepcopy(grad_list)
-    for g_i in grad_list:
-        random.shuffle(grad_list2)
-        for g_j in grad_list2:
-            g_i_g_j = torch.dot(g_i, g_j)
-            if g_i_g_j < 0:
-                g_i -= (g_i_g_j) * g_j / (g_j.norm() ** 2)
-
-    grads = torch.cat(grad_list, dim=0)
+    grad_list2 = [[*i] for i in zip(*grad_list2)] # col major to row major
+    for g_i_l in grad_list:
+        for g_i, g_j_l in zip(g_i_l, grad_list2):
+            random.shuffle(g_j_l)
+            for g_j in g_j_l:
+                g_i_g_j = torch.dot(g_i, g_j)
+                if g_i_g_j < 0:
+                    g_i -= (g_i_g_j) * g_j / (g_j.norm() ** 2)
+    
+    grads = torch.cat([torch.cat(grads, dim=0) for grads in grad_list], dim=0)
     grads = grads.view(len(losses), -1)
+    shares = torch.cat(shares, dim=0)
     if mode == 'mean':
         grads_share = grads * shares.float()
 
